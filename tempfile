@@ -1,0 +1,67 @@
+#!/bin/sh
+
+USERNAME="ai-agent"
+SSH_DIR="/home/$USERNAME/.ssh"
+AUTHORIZED_KEYS="$SSH_DIR/authorized_keys"
+KEY_DIR="/root"
+PEM_FILE="$KEY_DIR/$USERNAME.pem"
+
+# Check for sudo group (Alpine uses 'wheel' for sudo access)
+GROUP_NAME="wheel"
+if ! getent group "$GROUP_NAME" > /dev/null 2>&1; then
+    echo "Error: '$GROUP_NAME' group does not exist. Creating it manually..."
+    addgroup "$GROUP_NAME"
+fi
+
+# Create the user if it does not exist
+if ! id "$USERNAME" >/dev/null 2>&1; then
+    echo "Creating user '$USERNAME'..."
+    adduser -D -s /bin/sh "$USERNAME"
+    echo "User '$USERNAME' created successfully."
+else
+    echo "User '$USERNAME' already exists."
+fi
+
+# Add the user to the wheel group
+adduser "$USERNAME" "$GROUP_NAME"
+echo "User '$USERNAME' added to '$GROUP_NAME' group."
+
+# Create SSH directory if it doesn’t exist
+if [ ! -d "$SSH_DIR" ]; then
+    echo "Creating SSH directory..."
+    mkdir -p "$SSH_DIR"
+    chown "$USERNAME:$USERNAME" "$SSH_DIR"
+    chmod 700 "$SSH_DIR"
+fi
+
+# Generate SSH key pair if not already present
+if [ ! -f "$PEM_FILE" ]; then
+    echo "Generating SSH key pair..."
+    ssh-keygen -t rsa -b 4096 -m PEM -f "$PEM_FILE" -q -N ""
+    chmod 400 "$PEM_FILE"
+    chown root:root "$PEM_FILE"
+    echo "SSH key pair generated at: $PEM_FILE"
+else
+    echo "SSH key already exists at: $PEM_FILE"
+fi
+
+# Add public key to authorized_keys
+PUB_KEY="${PEM_FILE}.pub"
+if [ -f "$PUB_KEY" ]; then
+    echo "Setting up SSH access..."
+    cp "$PUB_KEY" "$AUTHORIZED_KEYS"
+    chmod 600 "$AUTHORIZED_KEYS"
+    chown "$USERNAME:$USERNAME" "$AUTHORIZED_KEYS"
+else
+    echo "Error: Public key file not found!"
+    exit 1
+fi
+
+# Configure SSH to disable password authentication and allow key-based login
+echo "Configuring SSH for key-based authentication..."
+sed -i 's/^#\?PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
+sed -i 's/^#\?PubkeyAuthentication no/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+rc-service sshd restart
+
+# Output the .pem file location
+echo "Passwordless SSH setup completed!"
