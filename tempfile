@@ -1,67 +1,51 @@
 #!/bin/sh
 
-USERNAME="ai-agent"
-SSH_DIR="/home/$USERNAME/.ssh"
-AUTHORIZED_KEYS="$SSH_DIR/authorized_keys"
-KEY_DIR="/root"
-PEM_FILE="$KEY_DIR/$USERNAME.pem"
+set -e 
 
-# Check for sudo group (Alpine uses 'wheel' for sudo access)
-GROUP_NAME="wheel"
-if ! getent group "$GROUP_NAME" > /dev/null 2>&1; then
-    echo "Error: '$GROUP_NAME' group does not exist. Creating it manually..."
-    addgroup "$GROUP_NAME"
-fi
+echo "Initializing host"
 
-# Create the user if it does not exist
-if ! id "$USERNAME" >/dev/null 2>&1; then
-    echo "Creating user '$USERNAME'..."
-    adduser -D -s /bin/sh "$USERNAME"
-    echo "User '$USERNAME' created successfully."
-else
-    echo "User '$USERNAME' already exists."
-fi
+check_docker() {
+    if command -v docker &> /dev/null; then
+        echo "Docker is already installed."
+    else
+        echo "Docker is not installed. Installing now..."
+        install_docker
+    fi
+}
 
-# Add the user to the wheel group
-adduser "$USERNAME" "$GROUP_NAME"
-echo "User '$USERNAME' added to '$GROUP_NAME' group."
+install_docker() {
+    echo "Installing Docker..."
+    mkdir -p /tmp/docker/
+    wget -O /tmp/docker/install_docker.sh https://get.docker.com/
+    sh /tmp/docker/install_docker.sh
+    rc-service docker start
+    docker --version
+    echo "Docker installation completed."
+}
 
-# Create SSH directory if it doesn’t exist
-if [ ! -d "$SSH_DIR" ]; then
-    echo "Creating SSH directory..."
-    mkdir -p "$SSH_DIR"
-    chown "$USERNAME:$USERNAME" "$SSH_DIR"
-    chmod 700 "$SSH_DIR"
-fi
+check_docker
 
-# Generate SSH key pair if not already present
-if [ ! -f "$PEM_FILE" ]; then
-    echo "Generating SSH key pair..."
-    ssh-keygen -t rsa -b 4096 -m PEM -f "$PEM_FILE" -q -N ""
-    chmod 400 "$PEM_FILE"
-    chown root:root "$PEM_FILE"
-    echo "SSH key pair generated at: $PEM_FILE"
-else
-    echo "SSH key already exists at: $PEM_FILE"
-fi
+echo "Creating folder structure..."
+mkdir -p /tmp/prometheus/
+mkdir -p /tmp/jmeter/
+mkdir -p /tmp/app/
+echo "Folder structure created successfully."
 
-# Add public key to authorized_keys
-PUB_KEY="${PEM_FILE}.pub"
-if [ -f "$PUB_KEY" ]; then
-    echo "Setting up SSH access..."
-    cp "$PUB_KEY" "$AUTHORIZED_KEYS"
-    chmod 600 "$AUTHORIZED_KEYS"
-    chown "$USERNAME:$USERNAME" "$AUTHORIZED_KEYS"
-else
-    echo "Error: Public key file not found!"
-    exit 1
-fi
+echo "Starting Socat proxy container..."
+docker run -d --name socat-proxy --restart always -p 2376:2376 -v /var/run/docker.sock:/var/run/docker.sock alpine/socat TCP-LISTEN:2376,fork UNIX-CONNECT:/var/run/docker.sock
+echo "Socat proxy container started successfully."
 
-# Configure SSH to disable password authentication and allow key-based login
-echo "Configuring SSH for key-based authentication..."
-sed -i 's/^#\?PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config
-sed -i 's/^#\?PubkeyAuthentication no/PubkeyAuthentication yes/' /etc/ssh/sshd_config
-rc-service sshd restart
+echo "Creating docker network"
 
-# Output the .pem file location
-echo "Passwordless SSH setup completed!"
+docker network create --subnet=192.168.0.0/16 agent-network
+
+echo "Creating docker stats exporter container"
+
+docker run -p 9487:9487 --network agent-network --ip 192.168.0.10 -d --name data-exporter --restart always -v /var/run/docker.sock:/var/run/docker.sock wywywywy/docker_stats_exporter
+
+echo "Creating prometheus server"
+
+wget -O /tmp/prometheus/prometheus.yml https://raw.githubusercontent.com/ShyamPrgrmr/Performance-testing-ai-agent/refs/heads/main/Node%20Agent/prometheus/prmoetheus.yaml
+docker run --name prometheus --network agent-network --restart always -d -p 9090:9090 -v /tmp/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml prom/prometheus
+
+echo "Initialization completed."
